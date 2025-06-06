@@ -134,8 +134,106 @@ app.delete("/products/:id", async (req, res) => {
   res.json({ message: "Product deleted" });
 });
 
+const nodemailer = require("nodemailer");
+
+app.post("/orders", async (req, res) => {
+  const { customer, order, items } = req.body;
+
+  try {
+    // 1. Insert or get existing customer by email
+    const { data: existingCustomer, error: customerFetchError } = await supabase
+      .from("customers")
+      .select("id")
+      .eq("email", customer.email)
+      .single();
+
+    if (customerFetchError && customerFetchError.code !== 'PGRST116') {
+      throw customerFetchError;
+    }
+
+    let customerId = existingCustomer?.id;
+
+    if (!customerId) {
+      const { data: insertedCustomer, error: insertCustomerError } = await supabase
+        .from("customers")
+        .insert([customer])
+        .select()
+        .single();
+
+      if (insertCustomerError) throw insertCustomerError;
+      customerId = insertedCustomer.id;
+    }
+
+    // 2. Insert the order
+    const { data: newOrder, error: insertOrderError } = await supabase
+      .from("orders")
+      .insert([{ ...order, customer_id: customerId }])
+      .select()
+      .single();
+
+    if (insertOrderError) throw insertOrderError;
+
+    const orderId = newOrder.id;
+
+    // 3. Insert order items
+    const orderItems = items.map((item) => ({
+      order_id: orderId,
+      product_id: item.product_id,
+      quantity: item.quantity,
+      price: item.price,
+      product_name: item.product_name
+    }));
+
+    const { error: insertItemsError } = await supabase
+      .from("orderitems")
+      .insert(orderItems);
+
+    if (insertItemsError) throw insertItemsError;
+
+    // 4. Send order confirmation email
+    const transporter = nodemailer.createTransport({
+      service: 'gmail', // or use SMTP details
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
+
+    const orderSummaryHtml = `
+      <h2>Order Confirmation</h2>
+      <p>Order #: <strong>${order.order_number}</strong></p>
+      <p>Estimated Delivery: ${order.estimated_delivery}</p>
+      <p>Subtotal: $${order.subtotal}</p>
+      <p>Shipping Fee: $${order.shipping_cost}</p>
+      <p>Total: $${order.total_amount}</p>
+      <h3>Items:</h3>
+      <ul>
+        ${items.map(i => `<li>${i.quantity} × ${i.product_name} - $${i.price}</li>`).join("")}
+      </ul>
+      <p>Shipping Address: ${customer.address}</p>
+      <p>Contact: ${customer.phone}</p>
+    `;
+
+    const emailOptions = {
+      from: process.env.EMAIL_USER,
+      to: [customer.email, process.env.COMPANY_EMAIL],
+      subject: `Order Confirmation - ${order.order_number}`,
+      html: orderSummaryHtml,
+    };
+
+    await transporter.sendMail(emailOptions);
+
+    res.status(201).json({ message: "Order placed and confirmation email sent!" });
+
+  } catch (error) {
+    console.error("Order submission failed:", error);
+    res.status(500).json({ error: error.message || "Failed to process order." });
+  }
+});
+
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
+
